@@ -3,13 +3,15 @@ use std::net::UdpSocket;
 struct Message {
     header: DNSHeader,
     questions: Vec<Question>,
+    answers: Vec<Answer>
 }
 
 impl Message {
     fn new(header: DNSHeader) -> Message {
         Message {
             header,
-            questions: Vec::new()
+            questions: Vec::new(),
+            answers: Vec::new(),
         }
     }
 
@@ -18,11 +20,19 @@ impl Message {
         self.header.nquestions += 1;
     }
 
+    fn add_answer(&mut self, answer: Answer) {
+        self.answers.push(answer);
+        self.header.nanswers += 1;
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&self.header.to_bytes());
         for question in &self.questions {
             buffer.extend_from_slice(&question.to_bytes());
+        }
+        for answer in &self.answers {
+            buffer.extend_from_slice(&answer.to_bytes());
         }
 
         buffer
@@ -62,24 +72,18 @@ impl DNSHeader {
     }
 }
 
-struct Question {
-    name: String,
-    qtype: u16,
-    class: u16,
+struct Name {
+    name: String
 }
 
-impl Question {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(&Question::to_labels(&self.name));
-        buffer.extend_from_slice(&self.qtype.to_be_bytes());
-        buffer.extend_from_slice(&self.class.to_be_bytes());
-        buffer
+impl Name {
+    fn new(name: &str) -> Name {
+        Name { name: String::from(name) }
     }
 
-    fn to_labels(domain_name: &str) -> Vec<u8> {
+    fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        for label in domain_name.split(".") {
+        for label in self.name.split(".") {
             buffer.push(label.len().try_into().expect("domain name component larger than 255 characters"));
             buffer.extend_from_slice(label.as_bytes());
         }
@@ -87,6 +91,45 @@ impl Question {
         buffer
     }
 }
+
+struct Question {
+    name: Name,
+    qtype: u16,
+    class: u16,
+}
+
+impl Question {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&self.name.to_bytes());
+        buffer.extend_from_slice(&self.qtype.to_be_bytes());
+        buffer.extend_from_slice(&self.class.to_be_bytes());
+        buffer
+    }
+}
+
+struct Answer {
+    name: Name,
+    atype: u16,
+    class: u16,
+    ttl: u32,
+    rdlength: u16,
+    rdata: Vec<u8>
+}
+
+impl Answer {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&self.name.to_bytes());
+        buffer.extend_from_slice(&self.atype.to_be_bytes());
+        buffer.extend_from_slice(&self.class.to_be_bytes());
+        buffer.extend_from_slice(&self.ttl.to_be_bytes());
+        buffer.extend_from_slice(&self.rdlength.to_be_bytes());
+        buffer.extend_from_slice(&self.rdata);
+        buffer
+    }
+}
+
 
 #[allow(dead_code)]
 enum DNSMessageType {
@@ -137,8 +180,11 @@ impl Flags {
 fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, _buffer: &[u8]) {
     let header = DNSHeader::new(1234, DNSMessageType::Reply);
     let mut msg = Message::new(header);
-    let question = Question{name: String::from("codecrafters.io"), qtype: 1, class: 1};
+    let question = Question{name: Name::new("codecrafters.io"), qtype: 1, class: 1};
     msg.add_question(question);
+    let rdata = "\x08\x08\x08\x08".as_bytes().to_vec();
+    let answer = Answer{name: Name::new("codecrafters.io"), atype: 1, class: 1, ttl: 60, rdlength: 4, rdata};
+    msg.add_answer(answer);
     let response = msg.to_bytes();
 
     socket
