@@ -1,5 +1,34 @@
 use std::net::UdpSocket;
 
+struct Message {
+    header: DNSHeader,
+    questions: Vec<Question>,
+}
+
+impl Message {
+    fn new(header: DNSHeader) -> Message {
+        Message {
+            header,
+            questions: Vec::new()
+        }
+    }
+
+    fn add_question(&mut self, question: Question) {
+        self.questions.push(question);
+        self.header.nquestions += 1;
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&self.header.to_bytes());
+        for question in &self.questions {
+            buffer.extend_from_slice(&question.to_bytes());
+        }
+
+        buffer
+    }
+}
+
 struct DNSHeader {
     id: u16,
     flags: Flags,
@@ -29,6 +58,32 @@ impl DNSHeader {
         buffer.extend_from_slice(&self.nanswers.to_be_bytes());
         buffer.extend_from_slice(&self.nrrs.to_be_bytes());
         buffer.extend_from_slice(&self.narrs.to_be_bytes());
+        buffer
+    }
+}
+
+struct Question {
+    name: String,
+    qtype: u16,
+    class: u16,
+}
+
+impl Question {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&Question::to_labels(&self.name));
+        buffer.extend_from_slice(&self.qtype.to_be_bytes());
+        buffer.extend_from_slice(&self.class.to_be_bytes());
+        buffer
+    }
+
+    fn to_labels(domain_name: &str) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        for label in domain_name.split(".") {
+            buffer.push(label.len().try_into().expect("domain name component larger than 255 characters"));
+            buffer.extend_from_slice(label.as_bytes());
+        }
+        buffer.push(0);
         buffer
     }
 }
@@ -80,8 +135,11 @@ impl Flags {
 }
 
 fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, _buffer: &[u8]) {
-    let dns_msg = DNSHeader::new(1234, DNSMessageType::Reply);
-    let response = dns_msg.to_bytes();
+    let header = DNSHeader::new(1234, DNSMessageType::Reply);
+    let mut msg = Message::new(header);
+    let question = Question{name: String::from("codecrafters.io"), qtype: 1, class: 1};
+    msg.add_question(question);
+    let response = msg.to_bytes();
 
     socket
         .send_to(&response, source)
