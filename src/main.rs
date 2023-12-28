@@ -1,4 +1,6 @@
-use std::net::UdpSocket;
+use std::{net::{UdpSocket, Ipv4Addr}, u8};
+use byteorder::{ByteOrder, BigEndian};
+
 
 struct Message {
     header: DNSHeader,
@@ -49,6 +51,7 @@ struct DNSHeader {
 }
 
 impl DNSHeader {
+    #[allow(dead_code)]
     fn new(id: u16, msg_type: DNSMessageType) -> DNSHeader {
         DNSHeader{
             id,
@@ -60,10 +63,42 @@ impl DNSHeader {
         }
     }
 
+    fn parse(buffer: &[u8]) -> DNSHeader {
+        assert!(buffer.len() >= 12, "header too small ({} < 12", buffer.len());
+
+        let flags = Flags {
+            qr: buffer[2] >> 7,
+            opcode: buffer[2] >> 3 & 0xf,
+            aa: buffer[2] >> 2 & 0x1,
+            tc: buffer[2] >> 1 & 0x1,
+            rd: buffer[2] & 0x1,
+            ra: buffer[3] >> 7,
+            z: buffer[3] >> 4 & 0xf,
+            rcode: buffer[3] & 0xf,
+        };
+
+        DNSHeader {
+            id: BigEndian::read_u16(&buffer[0..2]),
+            flags,
+            nquestions: BigEndian::read_u16(&buffer[4..6]),
+            nanswers: BigEndian::read_u16(&buffer[6..8]),
+            nrrs: BigEndian::read_u16(&buffer[8..10]),
+            narrs: BigEndian::read_u16(&buffer[10..12]),
+        }
+    }
+
+    fn clear_nquestions(&mut self) {
+        self.nquestions = 0;
+    }
+
+    fn setrcode(&mut self) {
+        self.flags.rcode = if self.flags.opcode == 0 { 0 } else { 4};
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&self.id.to_be_bytes());
-        buffer.extend_from_slice(&self.flags.to_be_bytes());
+        buffer.extend_from_slice(&self.flags.to_bytes());
         buffer.extend_from_slice(&self.nquestions.to_be_bytes());
         buffer.extend_from_slice(&self.nanswers.to_be_bytes());
         buffer.extend_from_slice(&self.nrrs.to_be_bytes());
@@ -156,6 +191,7 @@ struct Flags {
 }
 
 impl Flags {
+    #[allow(dead_code)]
     fn new(qr: DNSMessageType) -> Flags {
         Flags {
             qr: qr as u8,
@@ -169,7 +205,7 @@ impl Flags {
         }
     }
 
-    fn to_be_bytes(&self) -> [u8; 2] {
+    fn to_bytes(&self) -> [u8; 2] {
         let mut bytes = [0; 2];
         bytes[0] = (self.qr << 7) | (self.opcode << 3) | (self.aa << 2) | (self.tc << 1) | self.rd;
         bytes[1] = (self.ra << 7) | (self.z << 4) | self.rcode;
@@ -177,19 +213,31 @@ impl Flags {
     }
 }
 
-fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, _buffer: &[u8]) {
-    let header = DNSHeader::new(1234, DNSMessageType::Reply);
+fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, buffer: &[u8]) {
+    let mut header = DNSHeader::parse(buffer);
+
+    header.flags.qr = DNSMessageType::Reply as u8;
+    header.clear_nquestions();
+    header.setrcode();
+
     let mut msg = Message::new(header);
     let question = Question{name: Name::new("codecrafters.io"), qtype: 1, class: 1};
     msg.add_question(question);
-    let rdata = "\x08\x08\x08\x08".as_bytes().to_vec();
+
+    let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
     let answer = Answer{name: Name::new("codecrafters.io"), atype: 1, class: 1, ttl: 60, rdlength: 4, rdata};
     msg.add_answer(answer);
+
     let response = msg.to_bytes();
 
     socket
         .send_to(&response, source)
         .expect("Failed to send response");
+}
+
+fn ipv4_to_bytes(ip: Ipv4Addr) -> Vec<u8> {
+    let octets = ip.octets();
+    octets.to_vec()
 }
 
 fn main() {
