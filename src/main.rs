@@ -1,15 +1,14 @@
-use std::{net::{UdpSocket, Ipv4Addr}, u8};
-use byteorder::{ByteOrder, BigEndian};
+use std::{net::{UdpSocket, Ipv4Addr}, u8, io::{Read, BufReader}, u16};
 
 
 struct Message {
-    header: DNSHeader,
+    header: Header,
     questions: Vec<Question>,
     answers: Vec<Answer>
 }
 
 impl Message {
-    fn new(header: DNSHeader) -> Message {
+    fn new(header: Header) -> Message {
         Message {
             header,
             questions: Vec::new(),
@@ -41,7 +40,7 @@ impl Message {
     }
 }
 
-struct DNSHeader {
+struct Header {
     id: u16,
     flags: Flags,
     nquestions: u16,
@@ -50,10 +49,10 @@ struct DNSHeader {
     narrs: u16,
 }
 
-impl DNSHeader {
+impl Header {
     #[allow(dead_code)]
-    fn new(id: u16, msg_type: DNSMessageType) -> DNSHeader {
-        DNSHeader{
+    fn new(id: u16, msg_type: MessageType) -> Header {
+        Header{
             id,
             flags: Flags::new(msg_type),
             nquestions: 0,
@@ -63,11 +62,9 @@ impl DNSHeader {
         }
     }
 
-    fn parse(buffer: &[u8]) -> DNSHeader {
-        assert!(buffer.len() >= 12, "header too small ({} < 12", buffer.len());
-
+    fn parse(buffer: &[u8]) -> Header {
         let flags = Flags {
-            qr: buffer[2] >> 7,
+            qr: (buffer[2] >> 7).try_into().expect("invalid message type"),
             opcode: buffer[2] >> 3 & 0xf,
             aa: buffer[2] >> 2 & 0x1,
             tc: buffer[2] >> 1 & 0x1,
@@ -77,18 +74,14 @@ impl DNSHeader {
             rcode: buffer[3] & 0xf,
         };
 
-        DNSHeader {
-            id: BigEndian::read_u16(&buffer[0..2]),
+        Header {
+            id: u16::from_be_bytes(buffer[0..2].try_into().unwrap()),
             flags,
-            nquestions: BigEndian::read_u16(&buffer[4..6]),
-            nanswers: BigEndian::read_u16(&buffer[6..8]),
-            nrrs: BigEndian::read_u16(&buffer[8..10]),
-            narrs: BigEndian::read_u16(&buffer[10..12]),
+            nquestions: u16::from_be_bytes(buffer[4..6].try_into().unwrap()),
+            nanswers: u16::from_be_bytes(buffer[6..8].try_into().unwrap()),
+            nrrs: u16::from_be_bytes(buffer[8..10].try_into().unwrap()),
+            narrs: u16::from_be_bytes(buffer[10..12].try_into().unwrap()),
         }
-    }
-
-    fn clear_nquestions(&mut self) {
-        self.nquestions = 0;
     }
 
     fn setrcode(&mut self) {
@@ -107,13 +100,38 @@ impl DNSHeader {
     }
 }
 
+#[derive(Debug, Clone)]
 struct Name {
     name: String
 }
 
 impl Name {
+    #[allow(dead_code)]
     fn new(name: &str) -> Name {
         Name { name: String::from(name) }
+    }
+
+    fn parse(reader: &mut impl Read) -> Name {
+        let mut names: Vec<String> = Vec::new();
+
+        loop {
+            let mut len = [0];
+            let _ = reader.read_exact(&mut len);
+            let len = u8::from_be_bytes(len) as usize;
+
+            if len == 0 {
+                break;
+            }
+
+            let mut label = vec![0; len];
+            let _ = reader.read_exact(&mut label);
+
+            let label_str = String::from_utf8(label).unwrap();
+            names.push(label_str);
+        }
+
+        let name = names.join(".");
+        Name { name }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -127,37 +145,148 @@ impl Name {
     }
 }
 
+#[derive(Debug,Copy,Clone)]
+enum ResourceType {
+    A = 1,
+    NS,
+    MD,
+    MF,
+    CNAME,
+    SOA,
+    MB,
+    MG,
+    MR,
+    NULL,
+    WKS,
+    PTR,
+    HINFO,
+    MINFO,
+    MX,
+    TXT
+}
+
+impl TryFrom<u16> for ResourceType {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            x if x == ResourceType::A as u16  => Ok(ResourceType::A),
+            x if x == ResourceType::NS as u16  => Ok(ResourceType::NS),
+            x if x == ResourceType::MD as u16  => Ok(ResourceType::MD),
+            x if x == ResourceType::MF as u16  => Ok(ResourceType::MF),
+            x if x == ResourceType::CNAME as u16  => Ok(ResourceType::CNAME),
+            x if x == ResourceType::SOA as u16  => Ok(ResourceType::SOA),
+            x if x == ResourceType::MB as u16  => Ok(ResourceType::MB),
+            x if x == ResourceType::MG as u16  => Ok(ResourceType::MG),
+            x if x == ResourceType::MR as u16  => Ok(ResourceType::MR),
+            x if x == ResourceType::NULL as u16  => Ok(ResourceType::NULL),
+            x if x == ResourceType::WKS as u16  => Ok(ResourceType::WKS),
+            x if x == ResourceType::PTR as u16  => Ok(ResourceType::PTR),
+            x if x == ResourceType::HINFO as u16  => Ok(ResourceType::HINFO),
+            x if x == ResourceType::MINFO as u16  => Ok(ResourceType::MINFO),
+            x if x == ResourceType::MX as u16  => Ok(ResourceType::MX),
+            x if x == ResourceType::TXT as u16  => Ok(ResourceType::TXT),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug,Copy,Clone)]
+enum ResourceClass {
+    IN = 1,
+    CS,
+    CH,
+    HS
+}
+
+impl TryFrom<u16> for ResourceClass {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            x if x == ResourceClass::IN as u16  => Ok(ResourceClass::IN),
+            x if x == ResourceClass::CS as u16  => Ok(ResourceClass::CS),
+            x if x == ResourceClass::CH as u16  => Ok(ResourceClass::CH),
+            x if x == ResourceClass::HS as u16  => Ok(ResourceClass::HS),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Question {
     name: Name,
-    qtype: u16,
-    class: u16,
+    rtype: ResourceType,
+    class: ResourceClass,
 }
 
 impl Question {
+    fn parse(reader: &mut impl Read) -> Question {
+        let name = Name::parse(reader);
+
+        let mut buf = [0; 2];
+        let _ = reader.read_exact(&mut buf);
+        let rtype = u16::from_be_bytes(buf).try_into().unwrap();
+
+        let _ = reader.read_exact(&mut buf);
+        let class = u16::from_be_bytes(buf).try_into().unwrap();
+
+        Question {name, rtype, class}
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&self.name.to_bytes());
-        buffer.extend_from_slice(&self.qtype.to_be_bytes());
-        buffer.extend_from_slice(&self.class.to_be_bytes());
+        buffer.extend_from_slice(&(self.rtype as u16).to_be_bytes());
+        buffer.extend_from_slice(&(self.class as u16).to_be_bytes());
         buffer
     }
 }
 
 struct Answer {
     name: Name,
-    atype: u16,
-    class: u16,
+    rtype: ResourceType,
+    class: ResourceClass,
     ttl: u32,
     rdlength: u16,
     rdata: Vec<u8>
 }
 
 impl Answer {
+    #[allow(dead_code)]
+    fn parse(reader: &mut impl Read) -> Answer {
+        let name = Name::parse(reader);
+
+        let mut buf = [0; 2];
+        let mut buf4 = [0; 4];
+
+        let _ = reader.read_exact(&mut buf);
+        let rtype = u16::from_be_bytes(buf).try_into().unwrap();
+
+        let _ = reader.read_exact(&mut buf);
+        let class = u16::from_be_bytes(buf).try_into().unwrap();
+
+        let _ = reader.read_exact(&mut buf4);
+        let ttl = u32::from_be_bytes(buf4);
+
+        let _ = reader.read_exact(&mut buf);
+        let rdlength = u16::from_be_bytes(buf);
+
+        let _ = reader.read_exact(&mut buf4);
+        let mut rdata = vec![0; 4];
+        rdata[0] = u8::from_be(buf4[0]);
+        rdata[1] = u8::from_be(buf4[1]);
+        rdata[2] = u8::from_be(buf4[2]);
+        rdata[3] = u8::from_be(buf4[3]);
+
+        Answer { name, rtype, class, ttl, rdlength, rdata }
+    }
+
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&self.name.to_bytes());
-        buffer.extend_from_slice(&self.atype.to_be_bytes());
-        buffer.extend_from_slice(&self.class.to_be_bytes());
+        buffer.extend_from_slice(&(self.rtype as u16).to_be_bytes());
+        buffer.extend_from_slice(&(self.class as u16).to_be_bytes());
         buffer.extend_from_slice(&self.ttl.to_be_bytes());
         buffer.extend_from_slice(&self.rdlength.to_be_bytes());
         buffer.extend_from_slice(&self.rdata);
@@ -165,22 +294,33 @@ impl Answer {
     }
 }
 
-
-#[allow(dead_code)]
-enum DNSMessageType {
+#[derive(Copy, Clone)]
+enum MessageType {
     Query = 0,
     Reply
 }
 
+impl TryFrom<u8> for MessageType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            x if x == MessageType::Query as u8  => Ok(MessageType::Query),
+            x if x == MessageType::Reply as u8  => Ok(MessageType::Reply),
+            _ => Err(()),
+        }
+    }
+}
+
 #[allow(dead_code)]
-enum DNSMessageOpcode {
+enum MessageOpcode {
     Query = 0,
     IQuery = 1,
     Status = 2,
 }
 
 struct Flags {
-    qr: u8,
+    qr: MessageType,
     opcode: u8,
     aa: u8,
     tc: u8,
@@ -192,9 +332,9 @@ struct Flags {
 
 impl Flags {
     #[allow(dead_code)]
-    fn new(qr: DNSMessageType) -> Flags {
+    fn new(qr: MessageType) -> Flags {
         Flags {
-            qr: qr as u8,
+            qr,
             opcode: 0,
             aa: 0,
             tc: 0,
@@ -207,25 +347,28 @@ impl Flags {
 
     fn to_bytes(&self) -> [u8; 2] {
         let mut bytes = [0; 2];
-        bytes[0] = (self.qr << 7) | (self.opcode << 3) | (self.aa << 2) | (self.tc << 1) | self.rd;
+        bytes[0] = ((self.qr as u8) << 7) | (self.opcode << 3) | (self.aa << 2) | (self.tc << 1) | self.rd;
         bytes[1] = (self.ra << 7) | (self.z << 4) | self.rcode;
         bytes
     }
 }
 
 fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, buffer: &[u8]) {
-    let mut header = DNSHeader::parse(buffer);
-
-    header.flags.qr = DNSMessageType::Reply as u8;
-    header.clear_nquestions();
-    header.setrcode();
+    let header = Header::parse(&buffer[..12]);
 
     let mut msg = Message::new(header);
-    let question = Question{name: Name::new("codecrafters.io"), qtype: 1, class: 1};
+    msg.header.flags.qr = MessageType::Reply;
+    msg.header.nquestions = 0;
+    msg.header.setrcode();
+
+    let mut reader = BufReader::new(&buffer[12..]);
+
+    let question = Question::parse(&mut reader);
+    let name = question.name.clone();
     msg.add_question(question);
 
     let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
-    let answer = Answer{name: Name::new("codecrafters.io"), atype: 1, class: 1, ttl: 60, rdlength: 4, rdata};
+    let answer = Answer{name, rtype: ResourceType::A, class: ResourceClass::IN, ttl: 60, rdlength: 4, rdata};
     msg.add_answer(answer);
 
     let response = msg.to_bytes();
