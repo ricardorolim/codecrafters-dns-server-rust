@@ -1,4 +1,7 @@
-use std::{net::{UdpSocket, Ipv4Addr}, u8, io::{Read, BufReader}, u16};
+use std::{net::{UdpSocket, Ipv4Addr}, u8, u16, io::SeekFrom};
+use std::io::{Cursor, Read, Seek};
+
+const HEADER_LEN: u16 = 12;
 
 
 struct Message {
@@ -111,7 +114,7 @@ impl Name {
         Name { name: String::from(name) }
     }
 
-    fn parse(reader: &mut impl Read) -> Name {
+    fn parse<T: Read + Seek>(reader: &mut T) -> Name {
         let mut names: Vec<String> = Vec::new();
 
         loop {
@@ -119,7 +122,15 @@ impl Name {
             let _ = reader.read_exact(&mut len);
             let len = u8::from_be_bytes(len) as usize;
 
-            if len == 0 {
+            if len >> 6 == 0b11 { // compressed
+                let mut ptr_bottom = [0];
+                let _ = reader.read_exact(&mut ptr_bottom);
+                let ptr = (((len as u16) & 0x3f) << 8) | u8::from_be_bytes(ptr_bottom) as u16;
+
+                let label = Name::resolve(ptr, reader);
+                names.push(label);
+                break;
+            } else if len == 0 {
                 break;
             }
 
@@ -132,6 +143,14 @@ impl Name {
 
         let name = names.join(".");
         Name { name }
+    }
+
+    fn resolve<T: Read + Seek>(ptr: u16, reader: &mut T) -> String {
+        let pos = reader.stream_position().unwrap();
+        let _ = reader.seek(std::io::SeekFrom::Start(ptr.into()));
+        let name = Name::parse(reader).name;
+        let _ = reader.seek(SeekFrom::Start(pos));
+        name
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -221,7 +240,7 @@ struct Question {
 }
 
 impl Question {
-    fn parse(reader: &mut impl Read) -> Question {
+    fn parse<T: Read + Seek>(reader: &mut T) -> Question {
         let name = Name::parse(reader);
 
         let mut buf = [0; 2];
@@ -254,7 +273,7 @@ struct Answer {
 
 impl Answer {
     #[allow(dead_code)]
-    fn parse(reader: &mut impl Read) -> Answer {
+    fn parse<T: Read + Seek>(reader: &mut T) -> Answer {
         let name = Name::parse(reader);
 
         let mut buf = [0; 2];
@@ -354,22 +373,28 @@ impl Flags {
 }
 
 fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, buffer: &[u8]) {
-    let header = Header::parse(&buffer[..12]);
+    let header = Header::parse(&buffer[..HEADER_LEN as usize]);
+    let nquestions = header.nquestions;
 
     let mut msg = Message::new(header);
+
+    // reset header to be used in response
     msg.header.flags.qr = MessageType::Reply;
     msg.header.nquestions = 0;
     msg.header.setrcode();
 
-    let mut reader = BufReader::new(&buffer[12..]);
+    let mut reader = Cursor::new(buffer);
+    let _ = reader.seek(std::io::SeekFrom::Start(HEADER_LEN.into()));
 
-    let question = Question::parse(&mut reader);
-    let name = question.name.clone();
-    msg.add_question(question);
+    for _ in 0..nquestions {
+        let question = Question::parse(&mut reader);
+        let name = question.name.clone();
+        msg.add_question(question);
 
-    let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
-    let answer = Answer{name, rtype: ResourceType::A, class: ResourceClass::IN, ttl: 60, rdlength: 4, rdata};
-    msg.add_answer(answer);
+        let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
+        let answer = Answer{name, rtype: ResourceType::A, class: ResourceClass::IN, ttl: 60, rdlength: 4, rdata};
+        msg.add_answer(answer);
+    }
 
     let response = msg.to_bytes();
 
