@@ -1,13 +1,18 @@
 use std::{net::{UdpSocket, Ipv4Addr}, u8, u16, io::SeekFrom};
 use std::io::{Cursor, Read, Seek};
+use std::env;
+
 
 const HEADER_LEN: u16 = 12;
 
 
+#[derive(Debug, Clone)]
 struct Message {
     header: Header,
     questions: Vec<Question>,
-    answers: Vec<Answer>
+    answers: Vec<Answer>,
+    name_servers: Vec<Answer>,
+    additional: Vec<Answer>
 }
 
 impl Message {
@@ -16,17 +21,55 @@ impl Message {
             header,
             questions: Vec::new(),
             answers: Vec::new(),
+            name_servers: Vec::new(),
+            additional: Vec::new(),
         }
     }
 
     fn add_question(&mut self, question: Question) {
         self.questions.push(question);
-        self.header.nquestions += 1;
     }
 
     fn add_answer(&mut self, answer: Answer) {
         self.answers.push(answer);
-        self.header.nanswers += 1;
+    }
+
+    fn add_name_server(&mut self, answer: Answer) {
+        self.name_servers.push(answer);
+    }
+
+    fn add_additional(&mut self, answer: Answer) {
+        self.additional.push(answer);
+    }
+
+    fn parse(buffer: &[u8]) -> Message {
+        let header = Header::parse(&buffer[..HEADER_LEN as usize]);
+        let mut msg = Message::new(header);
+
+        let mut reader = Cursor::new(buffer);
+        let _ = reader.seek(std::io::SeekFrom::Start(HEADER_LEN.into()));
+
+        for _ in 0..msg.header.qdcount {
+            let question = Question::parse(&mut reader);
+            msg.add_question(question);
+        }
+
+        for _ in 0..msg.header.ancount {
+            let answer = Answer::parse(&mut reader);
+            msg.add_answer(answer);
+        }
+
+        for _ in 0..msg.header.nscount {
+            let answer = Answer::parse(&mut reader);
+            msg.add_name_server(answer);
+        }
+
+        for _ in 0..msg.header.arcount {
+            let answer = Answer::parse(&mut reader);
+            msg.add_additional(answer);
+        }
+
+        msg
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -43,13 +86,14 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone)]
 struct Header {
     id: u16,
     flags: Flags,
-    nquestions: u16,
-    nanswers: u16,
-    nrrs: u16,
-    narrs: u16,
+    qdcount: u16,
+    ancount: u16,
+    nscount: u16,
+    arcount: u16,
 }
 
 impl Header {
@@ -58,10 +102,10 @@ impl Header {
         Header{
             id,
             flags: Flags::new(msg_type),
-            nquestions: 0,
-            nanswers: 0,
-            nrrs: 0,
-            narrs: 0
+            qdcount: 0,
+            ancount: 0,
+            nscount: 0,
+            arcount: 0
         }
     }
 
@@ -80,25 +124,21 @@ impl Header {
         Header {
             id: u16::from_be_bytes(buffer[0..2].try_into().unwrap()),
             flags,
-            nquestions: u16::from_be_bytes(buffer[4..6].try_into().unwrap()),
-            nanswers: u16::from_be_bytes(buffer[6..8].try_into().unwrap()),
-            nrrs: u16::from_be_bytes(buffer[8..10].try_into().unwrap()),
-            narrs: u16::from_be_bytes(buffer[10..12].try_into().unwrap()),
+            qdcount: u16::from_be_bytes(buffer[4..6].try_into().unwrap()),
+            ancount: u16::from_be_bytes(buffer[6..8].try_into().unwrap()),
+            nscount: u16::from_be_bytes(buffer[8..10].try_into().unwrap()),
+            arcount: u16::from_be_bytes(buffer[10..12].try_into().unwrap()),
         }
-    }
-
-    fn setrcode(&mut self) {
-        self.flags.rcode = if self.flags.opcode == 0 { 0 } else { 4};
     }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(&self.id.to_be_bytes());
         buffer.extend_from_slice(&self.flags.to_bytes());
-        buffer.extend_from_slice(&self.nquestions.to_be_bytes());
-        buffer.extend_from_slice(&self.nanswers.to_be_bytes());
-        buffer.extend_from_slice(&self.nrrs.to_be_bytes());
-        buffer.extend_from_slice(&self.narrs.to_be_bytes());
+        buffer.extend_from_slice(&self.qdcount.to_be_bytes());
+        buffer.extend_from_slice(&self.ancount.to_be_bytes());
+        buffer.extend_from_slice(&self.nscount.to_be_bytes());
+        buffer.extend_from_slice(&self.arcount.to_be_bytes());
         buffer
     }
 }
@@ -164,7 +204,7 @@ impl Name {
     }
 }
 
-#[derive(Debug,Copy,Clone)]
+#[derive(Debug, Copy, Clone)]
 enum ResourceType {
     A = 1,
     NS,
@@ -210,7 +250,7 @@ impl TryFrom<u16> for ResourceType {
     }
 }
 
-#[derive(Debug,Copy,Clone)]
+#[derive(Debug, Copy, Clone)]
 enum ResourceClass {
     IN = 1,
     CS,
@@ -232,7 +272,7 @@ impl TryFrom<u16> for ResourceClass {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Question {
     name: Name,
     rtype: ResourceType,
@@ -262,6 +302,7 @@ impl Question {
     }
 }
 
+#[derive(Debug, Clone)]
 struct Answer {
     name: Name,
     rtype: ResourceType,
@@ -272,7 +313,6 @@ struct Answer {
 }
 
 impl Answer {
-    #[allow(dead_code)]
     fn parse<T: Read + Seek>(reader: &mut T) -> Answer {
         let name = Name::parse(reader);
 
@@ -280,7 +320,7 @@ impl Answer {
         let mut buf4 = [0; 4];
 
         let _ = reader.read_exact(&mut buf);
-        let rtype = u16::from_be_bytes(buf).try_into().unwrap();
+        let rtype = u16::from_be_bytes(buf).try_into().expect("Invalid resource type in answer section");
 
         let _ = reader.read_exact(&mut buf);
         let class = u16::from_be_bytes(buf).try_into().unwrap();
@@ -313,7 +353,7 @@ impl Answer {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 enum MessageType {
     Query = 0,
     Reply
@@ -338,6 +378,7 @@ enum MessageOpcode {
     Status = 2,
 }
 
+#[derive(Debug, Clone)]
 struct Flags {
     qr: MessageType,
     opcode: u8,
@@ -372,35 +413,57 @@ impl Flags {
     }
 }
 
-fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, buffer: &[u8]) {
-    let header = Header::parse(&buffer[..HEADER_LEN as usize]);
-    let nquestions = header.nquestions;
+fn handle_connection(socket: &UdpSocket, source: &std::net::SocketAddr, buffer: &[u8], resolver: &Option<String>) {
+    let mut orig_msg = Message::parse(buffer);
 
-    let mut msg = Message::new(header);
+    match resolver {
+        Some(resolver) => {
+            if orig_msg.header.qdcount == 1 {
+                // override original message with response from dns server
+                orig_msg = forward_query(&orig_msg, resolver).expect("Failed to receive response");
+            } else {
+                // a message with multiple questions is split into 
+                // multiple messages with one question each
+                let mut forwarded_msg = orig_msg.clone();
+                forwarded_msg.header.qdcount = 1;
 
-    // reset header to be used in response
-    msg.header.flags.qr = MessageType::Reply;
-    msg.header.nquestions = 0;
-    msg.header.setrcode();
+                for question in orig_msg.questions.clone() {
+                    forwarded_msg.questions.clear();
+                    forwarded_msg.add_question(question);
 
-    let mut reader = Cursor::new(buffer);
-    let _ = reader.seek(std::io::SeekFrom::Start(HEADER_LEN.into()));
-
-    for _ in 0..nquestions {
-        let question = Question::parse(&mut reader);
-        let name = question.name.clone();
-        msg.add_question(question);
-
-        let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
-        let answer = Answer{name, rtype: ResourceType::A, class: ResourceClass::IN, ttl: 60, rdlength: 4, rdata};
-        msg.add_answer(answer);
+                    let response = forward_query(&forwarded_msg, resolver).unwrap();
+                    if response.header.ancount > 0 {
+                        orig_msg.header.ancount += 1;
+                        orig_msg.add_answer(response.answers[0].to_owned());
+                    }
+                }
+            }
+        },
+        None => {
+            for question in orig_msg.questions.clone() {
+                let rdata = ipv4_to_bytes(Ipv4Addr::new(8, 8, 8, 8));
+                let answer = Answer{name: question.name, rtype: ResourceType::A, class: ResourceClass::IN, ttl: 60, rdlength: 4, rdata};
+                orig_msg.add_answer(answer);
+            }
+        }
     }
 
-    let response = msg.to_bytes();
+    orig_msg.header.flags.qr = MessageType::Reply;
+
+    let response = orig_msg.to_bytes();
 
     socket
         .send_to(&response, source)
         .expect("Failed to send response");
+}
+
+fn forward_query(msg: &Message, resolver: &str) -> std::io::Result<Message> {
+    let udp_socket = UdpSocket::bind("127.0.0.1:0").expect("Failed to bind to address");
+    udp_socket.send_to(&msg.to_bytes(), resolver).expect("Failed to send request");
+
+    let mut buf = [0; 512];
+    udp_socket.recv_from(&mut buf)?;
+    Ok(Message::parse(&mut buf))
 }
 
 fn ipv4_to_bytes(ip: Ipv4Addr) -> Vec<u8> {
@@ -408,7 +471,35 @@ fn ipv4_to_bytes(ip: Ipv4Addr) -> Vec<u8> {
     octets.to_vec()
 }
 
+fn usage(err_msg: Option<&str>) -> ! {
+    if err_msg.is_some() {
+        eprintln!("{}", err_msg.unwrap());
+    }
+
+    eprintln!("usage: {} [--resolver ip_address]", "your_server");
+    std::process::exit(1);
+}
+
+fn parse_resolver() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+
+    match args.len() {
+        1 => None,
+        3 => {
+            let arg1 = &args[1];
+            let arg2 = &args[2];
+            match &arg1[..] {
+                "--resolver" => Some(arg2.to_string()),
+                _ => usage(Some("Unrecognized option"))
+            }
+        },
+        _ => usage(None)
+    }
+}
+
 fn main() {
+    let resolver = parse_resolver();
+
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
 
@@ -416,7 +507,7 @@ fn main() {
         match udp_socket.recv_from(&mut buf) {
             Ok((size, source)) => {
                 println!("Received {} bytes from {}", size, source);
-                handle_connection(&udp_socket, &source, &buf);
+                handle_connection(&udp_socket, &source, &buf, &resolver);
             }
             Err(e) => {
                 eprintln!("Error receiving data: {}", e);
